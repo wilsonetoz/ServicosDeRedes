@@ -1,0 +1,145 @@
+---
+- name: Configurar Aplicacao Flask na AWS
+  hosts: webservers
+  become: yes
+
+  vars:
+    app_repo_url: https://github.com/joaomarceloalencar/devops.git
+    app_dest_path: /opt/devops-flask
+    flask_app_dir: "{{ app_dest_path }}/Laboratorios/01_Flask"
+
+  tasks:
+    - name: Atualizar cache de pacotes e fazer upgrade
+      ansible.builtin.apt:
+        update_cache: yes
+        upgrade: dist
+      when: ansible_os_family == "Debian"
+
+    - name: Instalar Python3 e pip3
+      ansible.builtin.apt:
+        name:
+          - python3
+          - python3-pip
+          - git
+          - nginx
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Instalar virtualenv
+      ansible.builtin.pip:
+        name: virtualenv
+        state: present
+        executable: pip3
+
+    - name: Clonar repositorio da aplicacao Flask
+      ansible.builtin.git:
+        repo: "{{ app_repo_url }}"
+        dest: "{{ app_dest_path }}"
+        version: main
+        force: yes
+
+    - name: Definir permissoes e propriedade para o diretorio da aplicacao
+      ansible.builtin.file:
+        path: "{{ flask_app_dir }}"
+        owner: ubuntu
+        group: www-data
+        mode: '0775'
+        recurse: yes
+      notify: Restart Flask App Service # Para garantir que, se ja estiver rodando, reinicie com as novas permissoes
+
+    - name: Criar arquivo requirements.txt no diretorio da aplicacao
+      ansible.builtin.copy:
+        content: |
+          Flask
+          gunicorn
+          flask_sqlalchemy
+        dest: "{{ flask_app_dir }}/requirements.txt"
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+
+    - name: Instalar dependencias do Flask via pip (usando virtualenv)
+      ansible.builtin.pip:
+        requirements: "{{ flask_app_dir }}/requirements.txt"
+        virtualenv: "{{ flask_app_dir }}/venv"
+        virtualenv_python: python3
+
+    - name: Copiar arquivo de servico systemd (todolist.service)
+      ansible.builtin.copy:
+        src: "{{ flask_app_dir }}/conf/todolist.service"
+        dest: /etc/systemd/system/flask_app.service
+        remote_src: yes
+      notify: Restart Flask App Service
+
+    - name: Corrigir WorkDirectory no servico Flask
+      ansible.builtin.replace:
+        path: /etc/systemd/system/flask_app.service
+        regexp: 'WorkingDirectory=/todolist/devops/Laboratorios/01_Flask/'
+        replace: 'WorkingDirectory={{ flask_app_dir }}'
+      notify: Restart Flask App Service
+
+    - name: Corrigir Environment PATH no servico Flask
+      ansible.builtin.replace:
+        path: /etc/systemd/system/flask_app.service
+        regexp: 'Environment="PATH=/todolist/venv/bin"'
+        replace: 'Environment="PATH={{ flask_app_dir }}/venv/bin:$PATH"'
+      notify: Restart Flask App Service
+
+    - name: Corrigir caminho ExecStart do Gunicorn no servico Flask
+      ansible.builtin.replace:
+        path: /etc/systemd/system/flask_app.service
+        regexp: 'ExecStart=/todolist/venv/bin/gunicorn'
+        replace: 'ExecStart={{ flask_app_dir }}/venv/bin/gunicorn'
+      notify: Restart Flask App Service
+
+    - name: Corrigir caminho e nome do socket Gunicorn no servico Flask
+      ansible.builtin.replace:
+        path: /etc/systemd/system/flask_app.service
+        regexp: '--bind unix:todolist.sock'
+        replace: '--bind unix:{{ flask_app_dir }}/flask_app.sock'
+      notify: Restart Flask App Service
+
+    - name: Habilitar e iniciar servico Flask
+      ansible.builtin.systemd:
+        name: flask_app
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+    - name: Remover o arquivo de configuracao default do Nginx (se existir)
+      ansible.builtin.file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Restart Nginx
+
+    - name: Copiar arquivo de configuracao do Nginx (todolist)
+      ansible.builtin.copy:
+        src: "{{ flask_app_dir }}/conf/todolist"
+        dest: /etc/nginx/sites-available/flask_app
+        remote_src: yes
+      notify: Restart Nginx
+
+    - name: Corrigir caminho do proxy_pass no Nginx
+      ansible.builtin.replace:
+        path: /etc/nginx/sites-available/flask_app
+        regexp: 'proxy_pass http://unix:/todolist/devops/Laboratorios/01_Flask/todolist.sock;'
+        replace: 'proxy_pass http://unix:{{ flask_app_dir }}/flask_app.sock;'
+      notify: Restart Nginx
+
+    - name: Criar link simbolico para habilitar o site Nginx
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/flask_app
+        dest: /etc/nginx/sites-enabled/flask_app
+        state: link
+      notify: Restart Nginx
+
+  handlers:
+    - name: Restart Flask App Service
+      ansible.builtin.systemd:
+        name: flask_app
+        state: restarted
+
+    - name: Restart Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
