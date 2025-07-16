@@ -45,7 +45,7 @@
         group: www-data
         mode: '0775'
         recurse: yes
-      notify: Restart Flask App Service # Para garantir que, se ja estiver rodando, reinicie com as novas permissoes
+      notify: Restart Flask App Service
 
     - name: Criar arquivo requirements.txt no diretorio da aplicacao
       ansible.builtin.copy:
